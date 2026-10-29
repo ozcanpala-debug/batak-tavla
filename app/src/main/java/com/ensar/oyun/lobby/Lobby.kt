@@ -1,5 +1,7 @@
 package com.ensar.oyun.lobby
 
+import com.ensar.oyun.game.BatakState
+import com.ensar.oyun.game.TavlaState
 import com.ensar.oyun.game.XoxState
 import org.json.JSONArray
 import org.json.JSONObject
@@ -36,6 +38,88 @@ object Wire {
 
     fun parseXox(j: JSONObject): XoxState =
         XoxState(j.getString("board"), j.getInt("turn"), j.getString("result"), j.getInt("round"))
+
+    // ---------------------------------------------------------------- Tavla
+
+    const val TAVLA_STATE = "TAVLA_STATE"
+    const val TAVLA_ROLL = "TAVLA_ROLL"
+    const val TAVLA_MOVE = "TAVLA_MOVE"
+
+    private fun ints(a: JSONArray): List<Int> = List(a.length()) { a.getInt(it) }
+
+    fun tavlaState(s: TavlaState): String =
+        JSONObject().put("t", TAVLA_STATE)
+            .put("p", JSONArray(s.points)).put("bar", JSONArray(s.bar)).put("off", JSONArray(s.off))
+            .put("turn", s.turn).put("dice", JSONArray(s.dice)).put("rolled", JSONArray(s.rolled))
+            .put("w", s.winner).put("round", s.round).put("skip", s.skipped)
+            .toString()
+
+    fun parseTavla(j: JSONObject): TavlaState =
+        TavlaState(
+            points = ints(j.getJSONArray("p")),
+            bar = ints(j.getJSONArray("bar")),
+            off = ints(j.getJSONArray("off")),
+            turn = j.getInt("turn"),
+            dice = ints(j.getJSONArray("dice")),
+            rolled = ints(j.getJSONArray("rolled")),
+            winner = j.getInt("w"),
+            round = j.getInt("round"),
+            skipped = j.getBoolean("skip"),
+        )
+
+    fun tavlaRoll(): String = JSONObject().put("t", TAVLA_ROLL).toString()
+
+    fun tavlaMove(from: Int, to: Int): String =
+        JSONObject().put("t", TAVLA_MOVE).put("from", from).put("to", to).toString()
+
+    // ---------------------------------------------------------------- Batak
+
+    const val BATAK_STATE = "BATAK_STATE"
+    const val BATAK_HAND = "BATAK_HAND"
+    const val BATAK_BID = "BATAK_BID"
+    const val BATAK_TRUMP = "BATAK_TRUMP"
+    const val BATAK_PLAY = "BATAK_PLAY"
+
+    fun batakState(s: BatakState): String =
+        JSONObject().put("t", BATAK_STATE)
+            .put("phase", s.phase).put("dealer", s.dealer).put("turn", s.turn)
+            .put("bids", JSONArray(s.bids)).put("highBid", s.highBid).put("highSeat", s.highSeat)
+            .put("trump", s.trump).put("trick", JSONArray(s.trick)).put("leader", s.leader)
+            .put("won", JSONArray(s.tricksWon)).put("scores", JSONArray(s.scores))
+            .put("counts", JSONArray(s.handCounts)).put("resolving", s.resolving)
+            .put("delta", JSONArray(s.lastDelta))
+            .toString()
+
+    fun parseBatak(j: JSONObject): BatakState =
+        BatakState(
+            phase = j.getInt("phase"),
+            dealer = j.getInt("dealer"),
+            turn = j.getInt("turn"),
+            bids = ints(j.getJSONArray("bids")),
+            highBid = j.getInt("highBid"),
+            highSeat = j.getInt("highSeat"),
+            trump = j.getInt("trump"),
+            trick = ints(j.getJSONArray("trick")),
+            leader = j.getInt("leader"),
+            tricksWon = ints(j.getJSONArray("won")),
+            scores = ints(j.getJSONArray("scores")),
+            handCounts = ints(j.getJSONArray("counts")),
+            resolving = j.getBoolean("resolving"),
+            lastDelta = ints(j.getJSONArray("delta")),
+        )
+
+    fun batakHand(cards: List<Int>): String =
+        JSONObject().put("t", BATAK_HAND).put("cards", JSONArray(cards)).toString()
+
+    fun parseHand(j: JSONObject): List<Int> = ints(j.getJSONArray("cards"))
+
+    fun batakBid(v: Int): String = JSONObject().put("t", BATAK_BID).put("v", v).toString()
+
+    fun batakTrump(suit: Int): String = JSONObject().put("t", BATAK_TRUMP).put("suit", suit).toString()
+
+    fun batakPlay(card: Int): String = JSONObject().put("t", BATAK_PLAY).put("card", card).toString()
+
+    // ---------------------------------------------------------------- Lobi
 
     fun lobby(game: Game, seats: List<Seat>, you: Int, started: Boolean): String {
         val arr = JSONArray()

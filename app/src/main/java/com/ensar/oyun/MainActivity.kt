@@ -27,6 +27,7 @@ import com.ensar.oyun.ui.GameScreen
 import com.ensar.oyun.ui.HomeScreen
 import com.ensar.oyun.ui.JoinScreen
 import com.ensar.oyun.ui.LobbyScreen
+import com.ensar.oyun.ui.TavlaScreen
 import com.ensar.oyun.ui.XoxScreen
 
 class MainActivity : ComponentActivity() {
@@ -94,6 +95,7 @@ class MainActivity : ComponentActivity() {
                             Screen.LOBBY -> LobbyScreen(vm)
                             Screen.GAME -> when (vm.game) {
                                 Game.XOX -> XoxScreen(vm)
+                                Game.TAVLA -> TavlaScreen(vm)
                                 else -> GameScreen(vm)
                             }
                         }

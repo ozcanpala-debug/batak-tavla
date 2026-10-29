@@ -8,6 +8,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ensar.oyun.game.BatakLogic
+import com.ensar.oyun.game.BatakPhase
+import com.ensar.oyun.game.BatakState
+import com.ensar.oyun.game.Cards
+import com.ensar.oyun.game.TavlaLogic
+import com.ensar.oyun.game.TavlaState
 import com.ensar.oyun.game.XoxLogic
 import com.ensar.oyun.game.XoxState
 import com.ensar.oyun.lobby.Game
@@ -22,8 +28,8 @@ import org.json.JSONObject
 enum class Screen { HOME, JOIN, LOBBY, GAME }
 
 /**
- * Oturumun tek sahibi. Kurucu telefon "hakem"dir: koltukları o yönetir,
- * oyun başlayınca (sonraki aşamada) kart dağıtımı ve zar da onda olacak.
+ * Oturumun tek sahibi. Kurucu telefon "hakem"dir: koltukları, zarı, kart dağıtımını ve
+ * hamle doğrulamasını o yapar. Diğer telefonlar sadece hamle isteği yollar ve durumu alır.
  */
 class SessionViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -43,11 +49,20 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var notice by mutableStateOf<String?>(null)
 
-    /** XOX tahtası. Tek gerçek kopya kurucuda; diğer telefonlar her hamleden sonra kopyasını alır. */
     var xox by mutableStateOf(XoxState())
         private set
+    var tavla by mutableStateOf(TavlaState())
+        private set
+    var batak by mutableStateOf(BatakState())
+        private set
 
-    /** Bağlantı testi için basit sohbet kutusu (oyun ekranları gelince kalkacak). */
+    /** Kendi Batak elim (sıralı). Rakiplerin eli hiçbir zaman telefonlara gönderilmez. */
+    var myHand by mutableStateOf(emptyList<Int>())
+        private set
+
+    /** Sadece kurucuda: dört elin gerçek hali. */
+    private var hands: List<MutableList<Int>> = emptyList()
+
     val chat = mutableStateListOf<String>()
 
     private val name: String get() = playerName.trim().ifEmpty { "Oyuncu" }
@@ -103,22 +118,43 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         broadcastLobby()
         net.broadcast(Wire.start())
         screen = Screen.GAME
-        if (game == Game.XOX) {
-            xox = XoxState()
-            net.broadcast(Wire.xoxState(xox))
-            maybeBotMove()
+        when (game) {
+            Game.XOX -> {
+                xox = XoxState()
+                net.broadcast(Wire.xoxState(xox))
+                maybeBotMove()
+            }
+            Game.TAVLA -> {
+                tavla = TavlaLogic.initial(0)
+                publishTavla()
+            }
+            Game.BATAK -> {
+                batak = BatakState()
+                dealBatak(0)
+            }
         }
+    }
+
+    fun sendChat(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        chat.add("$name: $t")
+        val msg = Wire.chat(name, t)
+        if (isHost) net.broadcast(msg) else net.sendToHost(msg)
+    }
+
+    fun leave() {
+        resetSession()
+        screen = Screen.HOME
     }
 
     // ------------------------------------------------------------ XOX
 
-    /** Bir kareye dokunuldu. Kurucuysa doğrudan uygula, değilse kurucuya yolla. */
     fun xoxTap(cell: Int) {
         if (!started || xox.result.isNotEmpty() || xox.turn != mySeat) return
         if (isHost) applyXox(mySeat, cell) else net.sendToHost(Wire.xoxMove(cell))
     }
 
-    /** Sadece kurucu: yeni tur başlat, başlayan taraf her turda değişir. */
     fun xoxRematch() {
         if (!isHost || game != Game.XOX) return
         val round = xox.round + 1
@@ -151,17 +187,161 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun sendChat(text: String) {
-        val t = text.trim()
-        if (t.isEmpty()) return
-        chat.add("$name: $t")
-        val msg = Wire.chat(name, t)
-        if (isHost) net.broadcast(msg) else net.sendToHost(msg)
+    // ------------------------------------------------------------ Tavla
+
+    fun tavlaRoll() {
+        if (!started || game != Game.TAVLA) return
+        if (isHost) hostTavlaRoll(mySeat) else net.sendToHost(Wire.tavlaRoll())
     }
 
-    fun leave() {
-        resetSession()
-        screen = Screen.HOME
+    fun tavlaMove(from: Int, to: Int) {
+        if (!started || game != Game.TAVLA) return
+        if (isHost) hostTavlaMove(mySeat, from, to) else net.sendToHost(Wire.tavlaMove(from, to))
+    }
+
+    fun tavlaRematch() {
+        if (!isHost || game != Game.TAVLA) return
+        tavla = TavlaLogic.initial(tavla.round + 1)
+        publishTavla()
+    }
+
+    private fun hostTavlaRoll(seat: Int) {
+        val s = tavla
+        if (s.winner >= 0 || s.turn != seat || s.dice.isNotEmpty()) return
+        tavla = TavlaLogic.settle(TavlaLogic.roll(s))
+        publishTavla()
+    }
+
+    private fun hostTavlaMove(seat: Int, from: Int, to: Int) {
+        val s = tavla
+        if (s.turn != seat || s.winner >= 0) return
+        // Aynı (from,to) için birden çok zar uyuyorsa (taş toplama) küçük zar harcanır.
+        val m = TavlaLogic.legalMoves(s, seat)
+            .filter { it.from == from && it.to == to }
+            .minByOrNull { it.die } ?: return
+        tavla = TavlaLogic.settle(TavlaLogic.apply(s, seat, m))
+        publishTavla()
+    }
+
+    private fun publishTavla() {
+        net.broadcast(Wire.tavlaState(tavla))
+        maybeTavlaBot()
+    }
+
+    private fun maybeTavlaBot() {
+        if (!isHost || game != Game.TAVLA || !started) return
+        val s = tavla
+        if (s.winner >= 0 || seats.getOrNull(s.turn)?.kind != SeatKind.BOT) return
+        viewModelScope.launch {
+            delay(900)
+            val now = tavla
+            if (!isHost || now != s) return@launch
+            if (now.dice.isEmpty()) {
+                hostTavlaRoll(now.turn)
+            } else {
+                val m = TavlaLogic.botMove(now, now.turn)
+                tavla = if (m == null) {
+                    TavlaLogic.settle(now.copy(dice = now.dice))
+                } else {
+                    TavlaLogic.settle(TavlaLogic.apply(now, now.turn, m))
+                }
+                publishTavla()
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ Batak
+
+    fun batakBid(v: Int) {
+        if (!started || game != Game.BATAK) return
+        if (isHost) hostBatakBid(mySeat, v) else net.sendToHost(Wire.batakBid(v))
+    }
+
+    fun batakChooseTrump(suit: Int) {
+        if (!started || game != Game.BATAK) return
+        if (isHost) hostBatakTrump(mySeat, suit) else net.sendToHost(Wire.batakTrump(suit))
+    }
+
+    fun batakPlay(card: Int) {
+        if (!started || game != Game.BATAK) return
+        if (isHost) hostBatakPlay(mySeat, card) else net.sendToHost(Wire.batakPlay(card))
+    }
+
+    fun batakNextHand() {
+        if (!isHost || game != Game.BATAK || batak.phase != BatakPhase.DONE) return
+        dealBatak((batak.dealer + 1) % 4)
+    }
+
+    private fun dealBatak(dealer: Int) {
+        hands = BatakLogic.deal().map { it.toMutableList() }
+        batak = BatakLogic.newHand(batak, dealer)
+        publishBatak()
+    }
+
+    private fun publishBatak() {
+        if (hands.size == 4) myHand = Cards.sortHand(hands[mySeat])
+        net.broadcast(Wire.batakState(batak))
+        if (hands.size == 4) {
+            seats.forEachIndexed { i, s ->
+                val id = s.endpointId
+                if (s.kind == SeatKind.HUMAN && id != null) {
+                    net.send(id, Wire.batakHand(Cards.sortHand(hands[i])))
+                }
+            }
+        }
+        maybeBatakBot()
+    }
+
+    private fun hostBatakBid(seat: Int, v: Int) {
+        if (!BatakLogic.canBid(batak, seat, v)) return
+        batak = BatakLogic.applyBid(batak, seat, v)
+        publishBatak()
+    }
+
+    private fun hostBatakTrump(seat: Int, suit: Int) {
+        val s = batak
+        if (s.phase != BatakPhase.TRUMP || s.highSeat != seat || suit !in 0..3) return
+        batak = BatakLogic.applyTrump(s, suit)
+        publishBatak()
+    }
+
+    private fun hostBatakPlay(seat: Int, card: Int) {
+        val s = batak
+        if (s.phase != BatakPhase.PLAY || s.resolving || s.turn != seat || hands.size != 4) return
+        val hand = hands[seat]
+        if (card !in hand) return
+        if (card !in BatakLogic.legalCards(hand, s.trick, s.trump, s.leader)) return
+        hand.remove(card)
+        batak = BatakLogic.playCard(s, seat, card)
+        publishBatak()
+        if (batak.resolving) {
+            viewModelScope.launch {
+                delay(1500)
+                if (isHost && batak.resolving) {
+                    batak = BatakLogic.resolveTrick(batak)
+                    publishBatak()
+                }
+            }
+        }
+    }
+
+    private fun maybeBatakBot() {
+        if (!isHost || game != Game.BATAK || !started || hands.size != 4) return
+        val s = batak
+        if (s.resolving || s.phase == BatakPhase.DONE) return
+        val seat = if (s.phase == BatakPhase.TRUMP) s.highSeat else s.turn
+        if (seats.getOrNull(seat)?.kind != SeatKind.BOT) return
+        viewModelScope.launch {
+            delay(900)
+            val now = batak
+            if (!isHost || now != s) return@launch
+            val hand = hands[seat]
+            when (now.phase) {
+                BatakPhase.BID -> hostBatakBid(seat, BatakLogic.botBid(now, hand, seat))
+                BatakPhase.TRUMP -> hostBatakTrump(seat, BatakLogic.botTrump(hand))
+                BatakPhase.PLAY -> hostBatakPlay(seat, BatakLogic.botCard(now, hand, seat))
+            }
+        }
     }
 
     // ------------------------------------------------------------ Ağ olayları
@@ -196,10 +376,13 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         setSeat(i, if (started) Seat(SeatKind.BOT, "Bot ${i + 1}") else Seat())
         broadcastLobby()
         maybeBotMove()
+        maybeTavlaBot()
+        maybeBatakBot()
     }
 
     private fun onReceived(from: String, text: String) {
         val j = runCatching { JSONObject(text) }.getOrNull() ?: return
+        val fromSeat = if (isHost) seats.indexOfFirst { it.endpointId == from } else -1
         when (j.optString("t")) {
             Wire.LOBBY -> if (!isHost) {
                 game = Game.valueOf(j.getString("game"))
@@ -213,10 +396,17 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
                 screen = Screen.GAME
             }
             Wire.XOX_STATE -> if (!isHost) xox = Wire.parseXox(j)
-            Wire.XOX_MOVE -> if (isHost) {
-                val seat = seats.indexOfFirst { it.endpointId == from }
-                if (seat >= 0) applyXox(seat, j.optInt("cell", -1))
+            Wire.XOX_MOVE -> if (isHost && fromSeat >= 0) applyXox(fromSeat, j.optInt("cell", -1))
+            Wire.TAVLA_STATE -> if (!isHost) tavla = Wire.parseTavla(j)
+            Wire.TAVLA_ROLL -> if (isHost && fromSeat >= 0) hostTavlaRoll(fromSeat)
+            Wire.TAVLA_MOVE -> if (isHost && fromSeat >= 0) {
+                hostTavlaMove(fromSeat, j.optInt("from", -2), j.optInt("to", -2))
             }
+            Wire.BATAK_STATE -> if (!isHost) batak = Wire.parseBatak(j)
+            Wire.BATAK_HAND -> if (!isHost) myHand = Wire.parseHand(j)
+            Wire.BATAK_BID -> if (isHost && fromSeat >= 0) hostBatakBid(fromSeat, j.optInt("v", -1))
+            Wire.BATAK_TRUMP -> if (isHost && fromSeat >= 0) hostBatakTrump(fromSeat, j.optInt("suit", -1))
+            Wire.BATAK_PLAY -> if (isHost && fromSeat >= 0) hostBatakPlay(fromSeat, j.optInt("card", -1))
             Wire.CHAT -> {
                 chat.add("${j.optString("from")}: ${j.optString("text")}")
                 if (isHost) net.broadcast(text, except = from)
@@ -246,6 +436,10 @@ class SessionViewModel(app: Application) : AndroidViewModel(app) {
         started = false
         isHost = false
         xox = XoxState()
+        tavla = TavlaState()
+        batak = BatakState()
+        myHand = emptyList()
+        hands = emptyList()
         chat.clear()
     }
 

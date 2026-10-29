@@ -23,6 +23,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import com.ensar.oyun.lobby.Game
+import com.ensar.oyun.ui.BatakScreen
 import com.ensar.oyun.ui.GameScreen
 import com.ensar.oyun.ui.HomeScreen
 import com.ensar.oyun.ui.JoinScreen
@@ -96,7 +97,7 @@ class MainActivity : ComponentActivity() {
                             Screen.GAME -> when (vm.game) {
                                 Game.XOX -> XoxScreen(vm)
                                 Game.TAVLA -> TavlaScreen(vm)
-                                else -> GameScreen(vm)
+                                Game.BATAK -> BatakScreen(vm)
                             }
                         }
                     }
